@@ -15,3 +15,5 @@ __pycache__/
 # Backups / scratch
 *.bak
 *.py.bak
+patch_order_placer.py
+*.bak-*

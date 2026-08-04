@@ -229,61 +229,151 @@ def select_serial_dropdown(page, serial):
 
 
 def enter_qty_js(page, quantity):
+    """Fill the Quantity cell, located by its column header.
+
+    DDécor added an 'Expected Stock Date' column at the front of the item
+    table in Aug 2026. The old 'first empty input in the row' approach then
+    filled that (disabled) date field instead, leaving Quantity blank — the
+    portal rejected the order with 'Required field is missing: [Quantity]'.
+    """
+    QTY_COLUMN_HEADER = "Quantity"
     return page.evaluate(f"""
         (function() {{
+            function norm(s) {{ return (s || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase(); }}
+            var want = norm('{QTY_COLUMN_HEADER}');
+
             var tables = document.querySelectorAll('table');
             for (var t = 0; t < tables.length; t++) {{
-                var headerText = tables[t].querySelector('thead') ? tables[t].querySelector('thead').innerText : '';
-                if (headerText.indexOf('Quantity') !== -1) {{
-                    var rows = tables[t].querySelectorAll('tbody tr');
-                    if (rows.length > 0) {{
-                        var lastRow = rows[rows.length - 1];
-                        var inputs = lastRow.querySelectorAll('input');
-                        for (var i = 0; i < inputs.length; i++) {{
-                            if (!inputs[i].value || inputs[i].value.trim() === '') {{
-                                inputs[i].focus();
-                                inputs[i].value = '{quantity}';
-                                inputs[i].dispatchEvent(new Event('input', {{bubbles: true}}));
-                                inputs[i].dispatchEvent(new Event('change', {{bubbles: true}}));
-                                inputs[i].dispatchEvent(new Event('blur', {{bubbles: true}}));
-                                return 'filled';
-                            }}
-                        }}
-                    }}
-                    return 'no_empty_input';
+                var thead = tables[t].querySelector('thead');
+                if (!thead) continue;
+                if (thead.innerText.indexOf('Quantity') === -1) continue;
+
+                var ths = tables[t].querySelectorAll('thead th');
+                var qtyCol = -1;
+                for (var h = 0; h < ths.length; h++) {{
+                    if (norm(ths[h].innerText) === want) {{ qtyCol = h; break; }}
                 }}
+                if (qtyCol === -1) return 'no_quantity_column';
+
+                var rows = tables[t].querySelectorAll('tbody tr');
+                if (rows.length === 0) return 'no_rows';
+                var lastRow = rows[rows.length - 1];
+                var cells = lastRow.querySelectorAll('td');
+                if (qtyCol >= cells.length) return 'qty_col_out_of_range';
+
+                var inputs = cells[qtyCol].querySelectorAll('input');
+                for (var i = 0; i < inputs.length; i++) {{
+                    var inp = inputs[i];
+                    if (inp.disabled || inp.readOnly) continue;
+                    inp.focus();
+                    inp.value = '{quantity}';
+                    inp.dispatchEvent(new Event('input',  {{bubbles: true}}));
+                    inp.dispatchEvent(new Event('change', {{bubbles: true}}));
+                    inp.dispatchEvent(new Event('blur',   {{bubbles: true}}));
+                    // read back — the field must actually hold the value
+                    if (String(inp.value).trim() === String('{quantity}').trim())
+                        return 'filled';
+                    return 'value_did_not_stick:' + inp.value;
+                }}
+                return 'no_editable_input_in_quantity_cell';
             }}
             return 'no_table';
         }})()
     """)
 
 
+def verify_qty_entered(page, quantity):
+    """Read the Quantity cell back. Returns (ok, actual_value)."""
+    try:
+        val = page.evaluate("""
+            (function() {
+                function norm(s) { return (s || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase(); }
+                var tables = document.querySelectorAll('table');
+                for (var t = 0; t < tables.length; t++) {
+                    var thead = tables[t].querySelector('thead');
+                    if (!thead || thead.innerText.indexOf('Quantity') === -1) continue;
+                    var ths = tables[t].querySelectorAll('thead th');
+                    var qtyCol = -1;
+                    for (var h = 0; h < ths.length; h++)
+                        if (norm(ths[h].innerText) === 'QUANTITY') { qtyCol = h; break; }
+                    if (qtyCol === -1) return null;
+                    var rows = tables[t].querySelectorAll('tbody tr');
+                    if (!rows.length) return null;
+                    var cells = rows[rows.length - 1].querySelectorAll('td');
+                    if (qtyCol >= cells.length) return null;
+                    var inputs = cells[qtyCol].querySelectorAll('input');
+                    for (var i = 0; i < inputs.length; i++)
+                        if (!inputs[i].disabled && !inputs[i].readOnly)
+                            return inputs[i].value;
+                    return null;
+                }
+                return null;
+            })()
+        """)
+    except Exception:
+        return False, None
+    if val is None:
+        return False, None
+    try:
+        return abs(float(val) - float(quantity)) < 0.001, val
+    except (TypeError, ValueError):
+        return str(val).strip() == str(quantity).strip(), val
+
+
 def read_table_data(page):
+    """Read the item row by COLUMN HEADER MAP rather than input position.
+
+    Hardcoded positions broke when DDécor inserted 'Expected Stock Date' at
+    the front of the table — unit_price started returning 'CL' (the Type
+    column) and gst_pct returned the unit price.
+    """
     try:
         return page.evaluate("""
             (function() {
+                function norm(s) { return (s || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase(); }
+                // header (normalised) → key we return
+                var MAP = {
+                    'COLLECTION':        'collection',
+                    'SERIALNO':          'serial_no',
+                    'QDS':               'qds',
+                    'WHSTOCK':           'wh_stock',
+                    'QUANTITY':          'quantity',
+                    'UNIT':              'unit',
+                    'TYPE':              'type',
+                    'UNITPRICE':         'unit_price',
+                    'GST':               'gst_pct',
+                    'GSTPERCENT':        'gst_pct',
+                    'EXPECTEDSTOCKDATE': 'expected_stock_date'
+                };
+
                 var tables = document.querySelectorAll('table');
                 for (var t = 0; t < tables.length; t++) {
-                    var h = tables[t].querySelector('thead') ? tables[t].querySelector('thead').innerText : '';
-                    if (h.indexOf('Quantity') !== -1) {
-                        var rows = tables[t].querySelectorAll('tbody tr');
-                        if (rows.length > 0) {
-                            var lastRow = rows[rows.length - 1];
-                            var cells = lastRow.querySelectorAll('td');
-                            var inputs = lastRow.querySelectorAll('input');
-                            var result = {};
-                            if (cells.length > 1) result.collection = cells[1] ? cells[1].innerText.trim() : '';
-                            if (cells.length > 2) result.serial_no = cells[2] ? cells[2].innerText.trim() : '';
-                            if (cells.length > 3) result.qds = cells[3] ? cells[3].innerText.trim() : '';
-                            var iv = [];
-                            for (var i = 0; i < inputs.length; i++) iv.push(inputs[i].value);
-                            if (iv.length >= 1) result.wh_stock = iv[0];
-                            if (iv.length >= 2) result.quantity = iv[1];
-                            if (iv.length >= 5) result.unit_price = iv[4];
-                            if (iv.length >= 6) result.gst_pct = iv[5];
-                            return result;
+                    var thead = tables[t].querySelector('thead');
+                    if (!thead || thead.innerText.indexOf('Quantity') === -1) continue;
+
+                    var ths = tables[t].querySelectorAll('thead th');
+                    var headers = [];
+                    for (var h = 0; h < ths.length; h++) headers.push(norm(ths[h].innerText));
+
+                    var rows = tables[t].querySelectorAll('tbody tr');
+                    if (rows.length === 0) continue;
+                    var lastRow = rows[rows.length - 1];
+                    var cells = lastRow.querySelectorAll('td');
+
+                    var result = {};
+                    for (var c = 0; c < cells.length; c++) {
+                        var key = MAP[headers[c]];
+                        if (!key) continue;
+                        var inputs = cells[c].querySelectorAll('input');
+                        if (inputs.length > 0) {
+                            result[key] = inputs[0].value;
+                        } else {
+                            result[key] = cells[c].innerText.trim();
                         }
                     }
+                    // keep the raw header list — makes the next portal change obvious
+                    result._headers = headers.join('|');
+                    return result;
                 }
                 return null;
             })()
@@ -523,6 +613,15 @@ def order_single_item(page, tracker, collection, serial, qty):
     time.sleep(2)
     wait_for_spinner_cycle(page)
     kill_spinner(page)
+
+    # Read it back. The portal silently drops the value in some states, and a
+    # blank Quantity is rejected only at submit time — by which point the old
+    # code had already recorded the submit as successful.
+    ok, actual = verify_qty_entered(page, qty)
+    if not ok:
+        tracker.fail("Verify quantity",
+                     f"Quantity cell holds {actual!r}, expected {qty}")
+        return None
     tracker.done()
 
     table_data = read_table_data(page) or {}
@@ -576,15 +675,74 @@ def submit_and_read_po(page, tracker):
     tracker.step("Waiting for order confirmation")
     po_data = {"submitted": True, "po_number": None, "subtotal": None, "tax": None, "total_cost": None}
 
+    # The old wait was `text=Purchase Order`, which also matches the Purchase
+    # Order LIST page and the nav — so it succeeded instantly, before the SPA
+    # had routed to the new PO, and every PO-read method then ran against a
+    # page with no PO number on it.
+    #
+    # First: did the portal reject the submission outright?
     try:
-        page.wait_for_selector("text=Purchase Order", timeout=30000)
-        time.sleep(3)
-        kill_spinner(page)
-        time.sleep(2)
-    except PWTimeout:
-        tracker.fail("Order confirmation", "Confirmation page did not load")
-        po_data["error"] = "Confirmation page timeout"
+        err = page.evaluate("""
+            (function() {
+                var sels = ['.slds-notify', '.toastContainer', '[role=alert]'];
+                for (var s = 0; s < sels.length; s++) {
+                    var els = document.querySelectorAll(sels[s]);
+                    for (var i = 0; i < els.length; i++) {
+                        var r = els[i].getBoundingClientRect();
+                        if (r.width === 0) continue;
+                        var t = (els[i].innerText || '').trim();
+                        if (!t) continue;
+                        if (/Required field is missing|Error!|is missing|not valid|Please enter/i.test(t))
+                            return t.substring(0, 200);
+                    }
+                }
+                return null;
+            })()
+        """)
+    except:
+        err = None
+    if err:
+        tracker.fail("Order rejected by portal", err.replace("\n", " ")[:150])
+        po_data["submitted"] = False
+        po_data["error"] = "Portal rejected the order: " + err.replace("\n", " ")[:150]
         return po_data
+
+    # Then: poll until the PO detail page has actually rendered.
+    confirmed = False
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            kill_spinner(page)
+            hit = page.evaluate("""
+                (function() {
+                    if (/\\/po\\d{4,9}(\\/|$|\\?)/i.test(window.location.href)) return 'url';
+                    var m = (document.title || '').match(/PO-\\d{5,7}/);
+                    if (m) return 'title';
+                    var all = document.querySelectorAll('lightning-formatted-text, slot, span, h1, h2');
+                    for (var i = 0; i < all.length; i++) {
+                        var t = (all[i].innerText || '').trim();
+                        if (/^PO-\\d{5,7}$/.test(t)) return 'element';
+                    }
+                    return null;
+                })()
+            """)
+            if hit:
+                confirmed = True
+                break
+        except:
+            pass
+        time.sleep(1)
+
+    if not confirmed:
+        tracker.fail("Order confirmation",
+                     "PO page did not render within 60s after submit")
+        po_data["error"] = "Confirmation page timeout"
+        po_data["needs_manual_check"] = True
+        return po_data
+
+    time.sleep(2)
+    kill_spinner(page)
+    time.sleep(1)
     tracker.done()
 
     # Read PO number
@@ -665,8 +823,15 @@ def submit_and_read_po(page, tracker):
         tracker.step(f"Portal order confirmed: {po_data['po_number']}")
         tracker.done()
     else:
-        tracker.fail("Read PO number", "Could not find PO number on confirmation page")
-        po_data["error"] = "PO number not found"
+        # We got to a confirmation page but could not read the number. The
+        # order most likely EXISTS at DDécor — flag it so nobody requeues it
+        # into a duplicate.
+        tracker.fail("Read PO number",
+                     "Order placed but PO number unreadable — check the portal "
+                     "before requeuing")
+        po_data["error"] = ("Order placed but PO number unreadable — verify on "
+                            "the DDécor portal before requeuing")
+        po_data["needs_manual_check"] = True
 
     return po_data
 
