@@ -4,4 +4,14 @@
 *.swp
 tags
 node_modules
-__pycache__
+__pycache__/
+
+# Secrets — never commit
+.env
+.env.*
+*.key
+*.pem
+
+# Backups / scratch
+*.bak
+*.py.bak
