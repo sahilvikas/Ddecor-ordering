@@ -270,7 +270,13 @@ def enter_qty_js(page, quantity):
                     inp.dispatchEvent(new Event('input',  {{bubbles: true}}));
                     inp.dispatchEvent(new Event('change', {{bubbles: true}}));
                     inp.dispatchEvent(new Event('blur',   {{bubbles: true}}));
-                    // read back — the field must actually hold the value
+                    // read back — the field must actually hold the value.
+                    // numeric compare — the portal normalises '2.0' to '2.00',
+                    // so a string compare rejects a perfectly good fill.
+                    var got  = parseFloat(inp.value);
+                    var want = parseFloat('{quantity}');
+                    if (!isNaN(got) && !isNaN(want) && Math.abs(got - want) < 0.001)
+                        return 'filled';
                     if (String(inp.value).trim() === String('{quantity}').trim())
                         return 'filled';
                     return 'value_did_not_stick:' + inp.value;
