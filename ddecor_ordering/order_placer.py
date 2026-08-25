@@ -516,9 +516,74 @@ def do_login(page, tracker, username, password):
     return True
 
 
+def dismiss_blockers(page):
+    """Close anything sitting on top of the page and blocking clicks.
+
+    The portal intermittently raises a Salesforce "Sorry to interrupt /
+    CSS Error" modal. While it is up, every click on the page is refused —
+    which is how a resolved, visible link can still time out on click.
+    """
+    try:
+        page.evaluate("""
+            (function() {
+                // close buttons on any visible dialog
+                var dialogs = document.querySelectorAll(
+                    '[role=dialog], .slds-modal, .modal-container');
+                for (var i = 0; i < dialogs.length; i++) {
+                    var r = dialogs[i].getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    var btns = dialogs[i].querySelectorAll(
+                        'button, .slds-modal__close, [title=Close], [title=close]');
+                    var clicked = false;
+                    for (var b = 0; b < btns.length; b++) {
+                        var t = (btns[b].innerText || btns[b].title || '').trim();
+                        if (/close|×|refresh|ok|dismiss/i.test(t)) {
+                            try { btns[b].click(); clicked = true; break; } catch (e) {}
+                        }
+                    }
+                    if (!clicked) dialogs[i].remove();
+                }
+                // backdrops and spinners that swallow pointer events
+                var junk = document.querySelectorAll(
+                    '.slds-backdrop, .slds-backdrop_open, .modal-backdrop, '
+                    + '.slds-spinner_container, lightning-spinner, .forceToastManager');
+                for (var j = 0; j < junk.length; j++) junk[j].remove();
+            })()
+        """)
+    except Exception:
+        pass
+
+
 def open_new_order_form(page, tracker):
     tracker.step("Opening new order form")
-    page.get_by_role("link", name="New Order").click()
+
+    dismiss_blockers(page)
+    kill_spinner(page)
+
+    # Navigate by URL rather than clicking the nav link. A click can be
+    # refused by any overlay; a goto cannot. The href is read off the link
+    # so nothing is hardcoded.
+    navigated = False
+    try:
+        href = page.get_by_role("link", name="New Order").first.get_attribute("href")
+        if href:
+            if href.startswith("/"):
+                origin = page.evaluate("window.location.origin")
+                href = origin + href
+            if href.startswith("http"):
+                page.goto(href, wait_until="domcontentloaded", timeout=45000)
+                navigated = True
+    except Exception:
+        navigated = False
+
+    if not navigated:
+        # fall back to the original click, forced past any overlay
+        try:
+            page.get_by_role("link", name="New Order").click(timeout=20000)
+        except Exception:
+            dismiss_blockers(page)
+            page.get_by_role("link", name="New Order").click(force=True, timeout=20000)
+
     try:
         page.get_by_role("button", name="New").wait_for(timeout=20000)
     except PWTimeout:
@@ -526,8 +591,14 @@ def open_new_order_form(page, tracker):
         return False
     time.sleep(1)
     kill_spinner(page)
+    dismiss_blockers(page)
 
-    page.get_by_role("button", name="New").click()
+    try:
+        page.get_by_role("button", name="New").click(timeout=20000)
+    except Exception:
+        dismiss_blockers(page)
+        kill_spinner(page)
+        page.get_by_role("button", name="New").click(force=True, timeout=20000)
     try:
         page.get_by_role("textbox", name="Order ref no").wait_for(timeout=20000)
     except PWTimeout:
@@ -1255,6 +1326,16 @@ def place_order(apo_name):
         except Exception as e:
             tracker.fail("Unexpected error", str(e)[:200])
             result["error"] = str(e)[:200]
+            # keep the FULL text — the 200-char field drops the part of a
+            # Playwright error that says WHY a click or wait failed
+            try:
+                import traceback as _tb
+                frappe.log_error(
+                    title=f"DDécor order failed — {apo_name}",
+                    message=f"{apo_name}\n\n{str(e)}\n\n{_tb.format_exc()}"
+                )
+            except Exception:
+                pass
 
         finally:
             try:
